@@ -158,6 +158,9 @@ func TestSchedulingHTTPWorkflow(t *testing.T) {
 	if owned.ID != candidate.ID {
 		t.Fatalf("caregiver retrieved wrong visit: %s", owned.ID)
 	}
+	if owned.EVV.Status != visits.EVVStatusPending || len(owned.EVV.ExceptionReasons) != 0 {
+		t.Fatalf("caregiver detail did not include enriched EVV state: %#v", owned.EVV)
+	}
 	assertSchedulingStatus(t, router, http.MethodGet, "/api/caregiver/visits/"+afterBoundary.ID.String(), nil, caregiverTwoToken, http.StatusNotFound)
 	assertSchedulingStatus(t, router, http.MethodGet, "/api/caregiver/visits/"+candidate.ID.String(), nil, caregiverOneToken, http.StatusNotFound)
 	assertSchedulingStatus(t, router, http.MethodPatch, "/api/visits/"+candidate.ID.String(), map[string]any{"scheduled_end": day.Add(19 * time.Hour)}, caregiverTwoToken, http.StatusForbidden)
@@ -180,6 +183,7 @@ func schedulingRouter(
 		coordinator.Put("/api/patients/{id}", patientHandler.Update)
 		coordinator.Get("/api/caregivers", caregiverHandler.List)
 		coordinator.Post("/api/visits", visitHandler.Create)
+		coordinator.Get("/api/visits/evv-summary", visitHandler.EVVSummary)
 		coordinator.Get("/api/visits", visitHandler.List)
 		coordinator.Get("/api/visits/{id}", visitHandler.Get)
 		coordinator.Patch("/api/visits/{id}", visitHandler.UpdateSchedule)
@@ -189,6 +193,8 @@ func schedulingRouter(
 		caregiver.Use(auth.RequireRole(users.RoleCaregiver))
 		caregiver.Get("/api/caregiver/visits", visitHandler.ListForCaregiver)
 		caregiver.Get("/api/caregiver/visits/{id}", visitHandler.GetForCaregiver)
+		caregiver.Post("/api/caregiver/visits/{id}/check-in", visitHandler.CheckIn)
+		caregiver.Post("/api/caregiver/visits/{id}/check-out", visitHandler.CheckOut)
 	})
 	return router
 }

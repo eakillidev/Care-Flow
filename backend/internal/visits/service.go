@@ -6,20 +6,24 @@ import (
 	"time"
 
 	"github.com/eakillidev/Care-Flow/backend/internal/database"
+	"github.com/eakillidev/Care-Flow/backend/internal/evv"
 	"github.com/eakillidev/Care-Flow/backend/internal/patients"
 	"github.com/eakillidev/Care-Flow/backend/internal/users"
 	"github.com/google/uuid"
 )
 
 var (
-	ErrInvalidSchedule          = errors.New("scheduled end must be after scheduled start")
-	ErrPatientNotFound          = errors.New("patient not found")
-	ErrCaregiverNotFound        = errors.New("caregiver not found")
-	ErrAssignedUserNotCaregiver = errors.New("assigned user is not a caregiver")
-	ErrOverlappingVisit         = errors.New("caregiver has an overlapping visit")
-	ErrVisitNotFound            = errors.New("visit not found")
-	ErrVisitNotSchedulable      = errors.New("visit cannot be rescheduled")
-	ErrVisitNotCancellable      = errors.New("visit cannot be cancelled")
+	ErrInvalidSchedule             = errors.New("scheduled end must be after scheduled start")
+	ErrPatientNotFound             = errors.New("patient not found")
+	ErrCaregiverNotFound           = errors.New("caregiver not found")
+	ErrAssignedUserNotCaregiver    = errors.New("assigned user is not a caregiver")
+	ErrOverlappingVisit            = errors.New("caregiver has an overlapping visit")
+	ErrVisitNotFound               = errors.New("visit not found")
+	ErrVisitNotSchedulable         = errors.New("visit cannot be rescheduled")
+	ErrVisitNotCancellable         = errors.New("visit cannot be cancelled")
+	ErrInvalidCoordinates          = errors.New("invalid coordinates")
+	ErrVisitNotAvailableForCheckIn = errors.New("visit is not available for check-in")
+	ErrVisitNotInProgress          = errors.New("visit is not in progress")
 )
 
 type CreateInput struct {
@@ -39,10 +43,28 @@ type Service struct {
 	visits   Repository
 	patients patients.Repository
 	users    users.Repository
+	evv      *evv.Service
+	now      func() time.Time
 }
 
 func NewService(visitRepository Repository, patientRepository patients.Repository, userRepository users.Repository) *Service {
-	return &Service{visits: visitRepository, patients: patientRepository, users: userRepository}
+	return NewServiceWithEVV(visitRepository, patientRepository, userRepository, evv.NewService(200, 15*time.Minute))
+}
+
+func NewServiceWithEVV(visitRepository Repository, patientRepository patients.Repository, userRepository users.Repository, evvService *evv.Service) *Service {
+	return NewServiceWithEVVClock(visitRepository, patientRepository, userRepository, evvService, time.Now)
+}
+
+func NewServiceWithEVVClock(visitRepository Repository, patientRepository patients.Repository, userRepository users.Repository, evvService *evv.Service, now func() time.Time) *Service {
+	return &Service{visits: visitRepository, patients: patientRepository, users: userRepository, evv: evvService, now: now}
+}
+
+type EVVResponse struct {
+	VisitID        uuid.UUID  `json:"visit_id"`
+	Status         Status     `json:"status"`
+	ActualCheckIn  *time.Time `json:"actual_check_in,omitempty"`
+	ActualCheckOut *time.Time `json:"actual_check_out,omitempty"`
+	EVV            evv.Result `json:"evv"`
 }
 
 func (service *Service) Create(ctx context.Context, input CreateInput) (*Detail, error) {
@@ -77,7 +99,22 @@ func (service *Service) Create(ctx context.Context, input CreateInput) (*Detail,
 }
 
 func (service *Service) List(ctx context.Context) ([]Detail, error) {
-	return service.visits.ListDetails(ctx)
+	return service.ListFiltered(ctx, Filter{})
+}
+
+func (service *Service) ListFiltered(ctx context.Context, filter Filter) ([]Detail, error) {
+	details, err := service.visits.ListDetailsFiltered(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	for index := range details {
+		enrichEVV(&details[index])
+	}
+	return details, nil
+}
+
+func (service *Service) Summary(ctx context.Context, filter Filter) (Summary, error) {
+	return service.visits.Summary(ctx, filter)
 }
 
 func (service *Service) Get(ctx context.Context, id uuid.UUID) (*Detail, error) {
@@ -85,11 +122,38 @@ func (service *Service) Get(ctx context.Context, id uuid.UUID) (*Detail, error) 
 	if errors.Is(err, database.ErrNotFound) {
 		return nil, ErrVisitNotFound
 	}
+	if err == nil {
+		enrichEVV(detail)
+	}
 	return detail, err
 }
 
+func enrichEVV(detail *Detail) {
+	detail.EVV = EVVDetail{
+		Status:           detail.EVVStatus,
+		ExceptionReasons: evv.ParseExceptions(detail.EVVException),
+		CheckIn:          EVVPoint{Timestamp: detail.ActualCheckIn, Latitude: detail.CheckInLatitude, Longitude: detail.CheckInLongitude},
+		CheckOut:         EVVPoint{Timestamp: detail.ActualCheckOut, Latitude: detail.CheckOutLatitude, Longitude: detail.CheckOutLongitude},
+	}
+	if detail.CheckInLatitude != nil && detail.CheckInLongitude != nil {
+		distance := evv.DistanceMeters(detail.Patient.Latitude, detail.Patient.Longitude, *detail.CheckInLatitude, *detail.CheckInLongitude)
+		detail.EVV.CheckIn.DistanceFromPatientMeters = &distance
+	}
+	if detail.CheckOutLatitude != nil && detail.CheckOutLongitude != nil {
+		distance := evv.DistanceMeters(detail.Patient.Latitude, detail.Patient.Longitude, *detail.CheckOutLatitude, *detail.CheckOutLongitude)
+		detail.EVV.CheckOut.DistanceFromPatientMeters = &distance
+	}
+}
+
 func (service *Service) ListForCaregiver(ctx context.Context, caregiverID uuid.UUID) ([]Detail, error) {
-	return service.visits.ListDetailsByCaregiver(ctx, caregiverID)
+	details, err := service.visits.ListDetailsByCaregiver(ctx, caregiverID)
+	if err != nil {
+		return nil, err
+	}
+	for index := range details {
+		enrichEVV(&details[index])
+	}
+	return details, nil
 }
 
 func (service *Service) GetForCaregiver(ctx context.Context, id, caregiverID uuid.UUID) (*Detail, error) {
@@ -97,7 +161,70 @@ func (service *Service) GetForCaregiver(ctx context.Context, id, caregiverID uui
 	if errors.Is(err, database.ErrNotFound) {
 		return nil, ErrVisitNotFound
 	}
+	if err == nil {
+		enrichEVV(detail)
+	}
 	return detail, err
+}
+
+func (service *Service) CheckIn(ctx context.Context, id, caregiverID uuid.UUID, latitude, longitude float64) (*EVVResponse, error) {
+	if !validCoordinates(latitude, longitude) {
+		return nil, ErrInvalidCoordinates
+	}
+	visit, err := service.visits.GetByID(ctx, id)
+	if errors.Is(err, database.ErrNotFound) || (err == nil && visit.CaregiverID != caregiverID) {
+		return nil, ErrVisitNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if visit.Status != StatusScheduled || visit.ActualCheckIn != nil {
+		return nil, ErrVisitNotAvailableForCheckIn
+	}
+	patient, err := service.patients.GetByID(ctx, visit.PatientID)
+	if err != nil {
+		return nil, err
+	}
+	checkedInAt := service.now().UTC()
+	result := service.evv.ValidateCheckIn(patient.Latitude, patient.Longitude, latitude, longitude, visit.ScheduledStart, checkedInAt)
+	updated, err := service.visits.CheckIn(ctx, id, caregiverID, checkedInAt, latitude, longitude, EVVStatus(result.Status), evv.JoinExceptions(result.Exceptions))
+	if errors.Is(err, database.ErrNotFound) {
+		return nil, ErrVisitNotAvailableForCheckIn
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &EVVResponse{VisitID: updated.ID, Status: updated.Status, ActualCheckIn: updated.ActualCheckIn, EVV: result}, nil
+}
+
+func (service *Service) CheckOut(ctx context.Context, id, caregiverID uuid.UUID, latitude, longitude float64) (*EVVResponse, error) {
+	if !validCoordinates(latitude, longitude) {
+		return nil, ErrInvalidCoordinates
+	}
+	visit, err := service.visits.GetByID(ctx, id)
+	if errors.Is(err, database.ErrNotFound) || (err == nil && visit.CaregiverID != caregiverID) {
+		return nil, ErrVisitNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if visit.Status != StatusInProgress || visit.ActualCheckIn == nil || visit.ActualCheckOut != nil {
+		return nil, ErrVisitNotInProgress
+	}
+	patient, err := service.patients.GetByID(ctx, visit.PatientID)
+	if err != nil {
+		return nil, err
+	}
+	checkedOutAt := service.now().UTC()
+	result := service.evv.ValidateCheckOut(patient.Latitude, patient.Longitude, latitude, longitude, evv.ParseExceptions(visit.EVVException))
+	updated, err := service.visits.CheckOut(ctx, id, caregiverID, checkedOutAt, latitude, longitude, EVVStatus(result.Status), evv.JoinExceptions(result.Exceptions))
+	if errors.Is(err, database.ErrNotFound) {
+		return nil, ErrVisitNotInProgress
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &EVVResponse{VisitID: updated.ID, Status: updated.Status, ActualCheckIn: updated.ActualCheckIn, ActualCheckOut: updated.ActualCheckOut, EVV: result}, nil
 }
 
 func (service *Service) UpdateSchedule(
@@ -201,4 +328,8 @@ func validateSchedule(start, end time.Time) error {
 		return ErrInvalidSchedule
 	}
 	return nil
+}
+
+func validCoordinates(latitude, longitude float64) bool {
+	return latitude >= -90 && latitude <= 90 && longitude >= -180 && longitude <= 180
 }

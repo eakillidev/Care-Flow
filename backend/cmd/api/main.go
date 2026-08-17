@@ -15,6 +15,7 @@ import (
 	"github.com/eakillidev/Care-Flow/backend/internal/caregivers"
 	"github.com/eakillidev/Care-Flow/backend/internal/config"
 	"github.com/eakillidev/Care-Flow/backend/internal/database"
+	"github.com/eakillidev/Care-Flow/backend/internal/evv"
 	"github.com/eakillidev/Care-Flow/backend/internal/patients"
 	"github.com/eakillidev/Care-Flow/backend/internal/users"
 	"github.com/eakillidev/Care-Flow/backend/internal/visits"
@@ -22,7 +23,10 @@ import (
 )
 
 func main() {
-	cfg := config.Load()
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalf("load configuration: %v", err)
+	}
 
 	dbContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -45,7 +49,8 @@ func main() {
 	authHandler := auth.NewHandler(authService, userRepository)
 	patientHandler := patients.NewHandler(patients.NewService(patientRepository))
 	caregiverHandler := caregivers.NewHandler(userRepository)
-	visitHandler := visits.NewHandler(visits.NewService(visitRepository, patientRepository, userRepository))
+	evvService := evv.NewService(cfg.EVVGeofenceMeters, cfg.EVVTimeTolerance)
+	visitHandler := visits.NewHandler(visits.NewServiceWithEVV(visitRepository, patientRepository, userRepository, evvService))
 
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,
@@ -102,6 +107,7 @@ func newRouter(
 				coordinator.Put("/api/patients/{id}", patientHandler.Update)
 				coordinator.Get("/api/caregivers", caregiverHandler.List)
 				coordinator.Post("/api/visits", visitHandler.Create)
+				coordinator.Get("/api/visits/evv-summary", visitHandler.EVVSummary)
 				coordinator.Get("/api/visits", visitHandler.List)
 				coordinator.Get("/api/visits/{id}", visitHandler.Get)
 				coordinator.Patch("/api/visits/{id}", visitHandler.UpdateSchedule)
@@ -112,6 +118,8 @@ func newRouter(
 				caregiver.Use(auth.RequireRole(users.RoleCaregiver))
 				caregiver.Get("/api/caregiver/visits", visitHandler.ListForCaregiver)
 				caregiver.Get("/api/caregiver/visits/{id}", visitHandler.GetForCaregiver)
+				caregiver.Post("/api/caregiver/visits/{id}/check-in", visitHandler.CheckIn)
+				caregiver.Post("/api/caregiver/visits/{id}/check-out", visitHandler.CheckOut)
 			})
 		}
 	})

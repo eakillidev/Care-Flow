@@ -15,7 +15,10 @@ func main() {
 	directory := flag.String("path", "migrations", "directory containing migration files")
 	flag.Parse()
 
-	cfg := config.Load()
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalf("load configuration: %v", err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 

@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Use repository npm version
+        run: npm install --global npm@11.5.2
+      - name: Install dependencies
+        run: npm ci
+      - name: Run tests
+        run: npm test -- --watch=false
+      - name: Build production bundle
+        run: npm run build
+
+  backend:
+    name: Backend
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgres://careflow_test:careflow_test@localhost:5432/careflow_test?sslmode=disable
+      TEST_DATABASE_URL: postgres://careflow_test:careflow_test@localhost:5432/careflow_test?sslmode=disable
+      JWT_SECRET: ci-only-jwt-secret
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: careflow_test
+          POSTGRES_USER: careflow_test
+          POSTGRES_PASSWORD: careflow_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U careflow_test -d careflow_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+          cache-dependency-path: backend/go.sum
+      - name: Download dependencies
+        run: go mod download
+      - name: Verify formatting
+        run: test -z "$(gofmt -l .)"
+      - name: Vet
+        run: go vet ./...
+      - name: Run unit tests
+        env:
+          TEST_DATABASE_URL: ''
+        run: go test ./...
+      - name: Apply migrations
+        run: go run ./cmd/migrate -direction up
+      - name: Run PostgreSQL integration tests
+        run: go test ./internal/integration

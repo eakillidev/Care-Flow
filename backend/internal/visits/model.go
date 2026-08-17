@@ -47,6 +47,22 @@ type PatientSummary struct {
 	FirstName string    `json:"first_name"`
 	LastName  string    `json:"last_name"`
 	Address   string    `json:"address"`
+	Latitude  float64   `json:"-"`
+	Longitude float64   `json:"-"`
+}
+
+type EVVPoint struct {
+	Timestamp                 *time.Time `json:"timestamp"`
+	Latitude                  *float64   `json:"latitude"`
+	Longitude                 *float64   `json:"longitude"`
+	DistanceFromPatientMeters *float64   `json:"distance_from_patient_meters"`
+}
+
+type EVVDetail struct {
+	Status           EVVStatus `json:"status"`
+	ExceptionReasons []string  `json:"exception_reasons"`
+	CheckIn          EVVPoint  `json:"check_in"`
+	CheckOut         EVVPoint  `json:"check_out"`
 }
 
 type CaregiverSummary struct {
@@ -72,4 +88,24 @@ type Detail struct {
 	EVVException      *string          `json:"evv_exception"`
 	CreatedAt         time.Time        `json:"created_at"`
 	UpdatedAt         time.Time        `json:"updated_at"`
+	EVV               EVVDetail        `json:"evv"`
+}
+
+type Filter struct {
+	Status      *Status
+	EVVStatus   *EVVStatus
+	CaregiverID *uuid.UUID
+	PatientID   *uuid.UUID
+	From        *time.Time
+	To          *time.Time
+}
+
+type Summary struct {
+	TotalVisits   int64 `json:"total_visits"`
+	Scheduled     int64 `json:"scheduled"`
+	InProgress    int64 `json:"in_progress"`
+	Completed     int64 `json:"completed"`
+	Cancelled     int64 `json:"cancelled"`
+	EVVVerified   int64 `json:"evv_verified"`
+	EVVExceptions int64 `json:"evv_exceptions"`
 }

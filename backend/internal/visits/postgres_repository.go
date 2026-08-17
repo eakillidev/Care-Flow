@@ -3,6 +3,7 @@ package visits
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/eakillidev/Care-Flow/backend/internal/database"
@@ -20,7 +21,7 @@ const visitColumns = `
 
 const detailColumns = `
     v.id,
-    p.id, p.first_name, p.last_name, p.address,
+    p.id, p.first_name, p.last_name, p.address, p.latitude, p.longitude,
     u.id, u.first_name, u.last_name,
     v.scheduled_start, v.scheduled_end,
     v.actual_check_in, v.actual_check_out,
@@ -110,7 +111,64 @@ func (repository *PostgresRepository) GetDetailForCaregiver(
 }
 
 func (repository *PostgresRepository) ListDetails(ctx context.Context) ([]Detail, error) {
-	return repository.listDetails(ctx, "SELECT "+detailColumns+detailFrom+" ORDER BY v.scheduled_start, v.id")
+	return repository.ListDetailsFiltered(ctx, Filter{})
+}
+
+func (repository *PostgresRepository) ListDetailsFiltered(ctx context.Context, filter Filter) ([]Detail, error) {
+	where, arguments := filterSQL(filter)
+	return repository.listDetails(ctx, "SELECT "+detailColumns+detailFrom+where+" ORDER BY v.scheduled_start, v.id", arguments...)
+}
+
+func (repository *PostgresRepository) Summary(ctx context.Context, filter Filter) (Summary, error) {
+	where, arguments := filterSQL(Filter{From: filter.From, To: filter.To})
+	var summary Summary
+	err := repository.pool.QueryRow(ctx, `SELECT
+        COUNT(*),
+        COUNT(*) FILTER (WHERE status = 'scheduled'),
+        COUNT(*) FILTER (WHERE status = 'in_progress'),
+        COUNT(*) FILTER (WHERE status = 'completed'),
+        COUNT(*) FILTER (WHERE status = 'cancelled'),
+        COUNT(*) FILTER (WHERE evv_status = 'verified'),
+        COUNT(*) FILTER (WHERE evv_status = 'exception')
+        FROM visits v`+where, arguments...).Scan(
+		&summary.TotalVisits, &summary.Scheduled, &summary.InProgress, &summary.Completed,
+		&summary.Cancelled, &summary.EVVVerified, &summary.EVVExceptions,
+	)
+	if err != nil {
+		return Summary{}, fmt.Errorf("summarize visits: %w", err)
+	}
+	return summary, nil
+}
+
+func filterSQL(filter Filter) (string, []any) {
+	conditions := make([]string, 0, 6)
+	arguments := make([]any, 0, 6)
+	add := func(condition string, value any) {
+		arguments = append(arguments, value)
+		conditions = append(conditions, fmt.Sprintf(condition, len(arguments)))
+	}
+	if filter.Status != nil {
+		add("v.status = $%d", *filter.Status)
+	}
+	if filter.EVVStatus != nil {
+		add("v.evv_status = $%d", *filter.EVVStatus)
+	}
+	if filter.CaregiverID != nil {
+		add("v.caregiver_id = $%d", *filter.CaregiverID)
+	}
+	if filter.PatientID != nil {
+		add("v.patient_id = $%d", *filter.PatientID)
+	}
+	if filter.From != nil {
+		add("v.scheduled_start >= $%d", *filter.From)
+	}
+	if filter.To != nil {
+		add("v.scheduled_start < $%d", *filter.To)
+	}
+	if len(conditions) == 0 {
+		return "", arguments
+	}
+	return " WHERE " + strings.Join(conditions, " AND "), arguments
 }
 
 func (repository *PostgresRepository) ListDetailsByCaregiver(
@@ -166,6 +224,67 @@ func (repository *PostgresRepository) UpdateStatus(ctx context.Context, id uuid.
         UPDATE visits SET status = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
 		status,
 	)
+}
+
+func (repository *PostgresRepository) CheckIn(
+	ctx context.Context,
+	id, caregiverID uuid.UUID,
+	checkedInAt time.Time,
+	latitude, longitude float64,
+	evvStatus EVVStatus,
+	exception *string,
+) (*Visit, error) {
+	row := repository.pool.QueryRow(ctx, `
+        UPDATE visits
+        SET actual_check_in = $3,
+            check_in_latitude = $4,
+            check_in_longitude = $5,
+            status = 'in_progress',
+            evv_status = $6,
+            evv_exception = $7,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1
+          AND caregiver_id = $2
+          AND status = 'scheduled'
+          AND actual_check_in IS NULL
+        RETURNING `+visitColumns,
+		id, caregiverID, checkedInAt, latitude, longitude, evvStatus, exception)
+	visit, err := scanVisit(row)
+	if err != nil {
+		return nil, fmt.Errorf("check in visit: %w", database.NormalizeError(err))
+	}
+	return visit, nil
+}
+
+func (repository *PostgresRepository) CheckOut(
+	ctx context.Context,
+	id, caregiverID uuid.UUID,
+	checkedOutAt time.Time,
+	latitude, longitude float64,
+	evvStatus EVVStatus,
+	exception *string,
+) (*Visit, error) {
+	row := repository.pool.QueryRow(ctx, `
+        UPDATE visits
+        SET actual_check_out = $3,
+            check_out_latitude = $4,
+            check_out_longitude = $5,
+            status = 'completed',
+            evv_status = $6,
+            evv_exception = $7,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = $1
+          AND caregiver_id = $2
+          AND status = 'in_progress'
+          AND actual_check_in IS NOT NULL
+          AND actual_check_out IS NULL
+        RETURNING `+visitColumns,
+		id, caregiverID, checkedOutAt, latitude, longitude, evvStatus, exception)
+	visit, err := scanVisit(row)
+	if err != nil {
+		return nil, fmt.Errorf("check out visit: %w", database.NormalizeError(err))
+	}
+	return visit, nil
 }
 
 func (repository *PostgresRepository) UpdateCheckIn(
@@ -341,6 +460,8 @@ func scanDetail(row interface{ Scan(...any) error }) (*Detail, error) {
 		&detail.Patient.FirstName,
 		&detail.Patient.LastName,
 		&detail.Patient.Address,
+		&detail.Patient.Latitude,
+		&detail.Patient.Longitude,
 		&detail.Caregiver.ID,
 		&detail.Caregiver.FirstName,
 		&detail.Caregiver.LastName,

@@ -2,7 +2,7 @@ FROM node:22-alpine AS build
 
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci
+RUN npm install --global npm@11.5.2 && npm ci
 COPY . .
 RUN npm run build
 

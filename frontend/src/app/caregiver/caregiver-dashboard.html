@@ -1,0 +1,25 @@
+<app-header section="My Visits" />
+<main class="page">
+  <header class="intro"><p class="eyebrow">Caregiver workspace</p><h1>My visits</h1><p>Review assigned care and record visit arrival and departure.</p></header>
+  @if (error) { <div class="error" role="alert">{{ error }}</div> }
+  @if (loading) { <div class="state">Loading visits…</div> }
+  @else if (!visits.length) { <div class="state"><h2>No assigned visits</h2><p>Your assigned visits will appear here.</p></div> }
+  @else { <section class="visit-grid" aria-label="Assigned visits">
+    @for (visit of visits; track visit.id) { <article class="visit-card">
+      <div><h2>{{ name(visit) }}</h2><p class="address">{{ visit.patient.address || 'Address unavailable' }}</p></div>
+      <p class="time"><strong>{{ visit.scheduled_start | date:'mediumDate' }}</strong><br>{{ visit.scheduled_start | date:'shortTime' }} – {{ visit.scheduled_end | date:'shortTime' }}</p>
+      <div class="badges"><span [class]="'badge '+visit.status">{{ visit.status.replaceAll('_', ' ') }}</span><span [class]="'badge '+visit.evv_status">EVV {{ visit.evv_status }}</span></div>
+      <button type="button" class="review" (click)="open(visit)">View visit</button>
+    </article> }
+  </section> }
+
+  @if (selected; as visit) { <div class="overlay" (click)="close()"><aside class="detail" aria-label="Visit detail" (click)="$event.stopPropagation()">
+    <button type="button" class="close" (click)="close()" aria-label="Close visit detail">×</button>
+    <p class="eyebrow">Assigned visit</p><h2>{{ name(visit) }}</h2><p class="address">{{ visit.patient.address || 'Address unavailable' }}</p>
+    <dl><dt>Scheduled</dt><dd>{{ visit.scheduled_start | date:'medium' }} – {{ visit.scheduled_end | date:'shortTime' }}</dd><dt>Status</dt><dd><span [class]="'badge '+visit.status">{{ visit.status.replaceAll('_', ' ') }}</span></dd><dt>EVV</dt><dd><span [class]="'badge '+visit.evv_status">{{ visit.evv_status }}</span></dd><dt>Checked in</dt><dd>{{ visit.actual_check_in ? (visit.actual_check_in | date:'medium') : '—' }}</dd><dt>Checked out</dt><dd>{{ visit.actual_check_out ? (visit.actual_check_out | date:'medium') : '—' }}</dd></dl>
+    @if (reasons(visit).length) { <section class="exceptions"><h3>EVV exceptions</h3><ul>@for (reason of reasons(visit); track reason) { <li>{{ reason | exceptionLabel }}</li> }</ul></section> }
+    @if (actionError) { <p class="error" role="alert">{{ actionError }}</p> }
+    @if (visit.status === 'scheduled') { <button type="button" class="action" [disabled]="processing" (click)="checkIn()">{{ processing ? 'Getting location…' : 'Check In' }}</button> }
+    @if (visit.status === 'in_progress') { <button type="button" class="action" [disabled]="processing" (click)="checkOut()">{{ processing ? 'Getting location…' : 'Check Out' }}</button> }
+  </aside></div> }
+</main>

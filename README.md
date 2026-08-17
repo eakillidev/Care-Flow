@@ -1,18 +1,70 @@
 # CareFlow
 
-CareFlow is a full-stack homecare visit management platform for caregiver scheduling, Electronic Visit Verification (EVV), and visit exception management.
+CareFlow is a full-stack homecare visit management platform for caregiver scheduling, Electronic Visit Verification (EVV), and visit exception monitoring.
 
 ## Overview
 
-CareFlow currently provides an Angular shell, a Go API, a PostgreSQL persistence layer, and JWT authentication for coordinator and caregiver roles. Application workflows and UI features are intentionally deferred.
+Coordinators manage patients, schedule visits, assign caregivers, and review visit and EVV exception status. Caregivers see only their assigned visits and use browser geolocation to check in and out. The Go API validates ownership, visit state, scheduling conflicts, time tolerance, and proximity to the patient's location.
 
 ## Tech Stack
 
-- Frontend: Angular 21 and TypeScript
-- Backend: Go 1.24, chi, and pgx/pgxpool
-- Authentication: bcrypt passwords and HMAC-SHA256 JWT access tokens
-- Database: PostgreSQL 17
-- Local development: Docker and Docker Compose
+- **Frontend:** Angular 21, TypeScript
+- **Backend:** Go 1.24, chi
+- **Database:** PostgreSQL 17, pgx/pgxpool
+- **Security:** bcrypt, JWT, role-based authorization
+- **Development and quality:** Docker, Docker Compose, GitHub Actions, Angular tests, Go unit tests, PostgreSQL integration tests
+
+## Core Features
+
+- Coordinator and caregiver authentication
+- Patient management and caregiver assignment
+- Visit scheduling and overlap detection
+- Role-based and ownership-based access control
+- GPS-based EVV check-in and check-out
+- Configurable geofence and time-window validation
+- Stable EVV exception handling
+- Coordinator monitoring and EVV review dashboard
+- Caregiver assignment and visit-action dashboard
+
+## Architecture
+
+```text
+Angular + TypeScript
+        |
+        v
+      Go API
+        |
+        v
+   PostgreSQL
+```
+
+HTTP handlers, business services, EVV rules, and repositories have separate responsibilities. Database access remains isolated behind explicit pgx repositories and parameterized SQL. See [ARCHITECTURE.md](ARCHITECTURE.md) for the key decisions.
+
+## EVV Workflow
+
+```text
+Coordinator schedules visit
+        |
+        v
+Caregiver receives assignment
+        |
+        v
+Caregiver checks in
+        |
+        v
+Go API validates time + location
+        |
+        v
+Verified or EVV Exception
+        |
+        v
+Caregiver checks out
+        |
+        v
+Coordinator reviews completed visit
+```
+
+The API uses server-generated timestamps. Check-in is valid within the configured time tolerance and geofence; violations are recorded as EVV exceptions rather than silently discarded. Conditional PostgreSQL updates protect check-in and check-out state transitions from duplicate concurrent requests.
 
 ## Project Structure
 
@@ -20,76 +72,27 @@ CareFlow currently provides an Angular shell, a Go API, a PostgreSQL persistence
 Care-Flow/
 |-- frontend/                 Angular application
 |-- backend/
-|   |-- cmd/api/              API entry point
-|   |-- cmd/migrate/          Migration command
-|   |-- cmd/seed/             Development seed command
-|   |-- internal/             Models and PostgreSQL repositories
-|   `-- migrations/           Versioned up/down SQL migrations
-|-- docker-compose.yml
-|-- .env.example
-`-- README.md
+|   |-- cmd/                  API, migration, and seed commands
+|   |-- internal/             Auth, domain services, EVV, and repositories
+|   `-- migrations/           Versioned PostgreSQL migrations
+|-- docs/images/              Portfolio screenshot location
+|-- .github/workflows/        Continuous integration
+|-- ARCHITECTURE.md
+`-- docker-compose.yml
 ```
 
-## Database Schema
-
-- `users`: caregivers and coordinators; email is unique and roles are constrained.
-- `patients`: patient identity, address, and coordinates.
-- `visits`: patient/caregiver assignments, scheduled and actual times, coordinates, status, and EVV result.
-
-Visit foreign keys use `ON DELETE RESTRICT` to preserve history. The schema checks role/status values, coordinate ranges, and that scheduled end is later than scheduled start. The unique email constraint supplies the email index; visits also have focused indexes for caregiver, patient, start time, status, and EVV status.
-
-## Configuration
-
-Copy `.env.example` to `.env`. PostgreSQL is configured with `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, and `POSTGRES_SSLMODE`. `DATABASE_URL` can be supplied instead and takes precedence.
-
-`JWT_SECRET` is required by the API and signs access tokens. Replace the example value outside local development. Tokens expire after 24 hours; refresh tokens are not implemented.
-
-## Running with Docker
+## Local Setup
 
 ```bash
 cp .env.example .env
-docker compose up --build -d postgres
+docker compose up --build -d
 docker compose run --rm backend careflow-migrate -direction up
-docker compose up --build
-```
-
-The frontend is served at `http://localhost:4200`; the API and `GET /health` are at `http://localhost:8080`.
-
-## Migrations
-
-From a machine with Go installed:
-
-```bash
-cd backend
-go run ./cmd/migrate -direction up
-go run ./cmd/migrate -direction down
-```
-
-Or use Docker from the repository root:
-
-```bash
-docker compose run --rm backend careflow-migrate -direction up
-docker compose run --rm backend careflow-migrate -direction down
-```
-
-`up` applies every pending migration. `down` rolls back the latest applied migration.
-
-## Development Seed
-
-After applying migrations, insert one fake coordinator, two fake caregivers, two fake patients, and three fake visits:
-
-```bash
-cd backend
-go run ./cmd/seed
-```
-
-Or with Docker:
-
-```bash
 docker compose run --rm backend careflow-seed
 ```
 
-The seed uses stable UUIDs and stores bcrypt hashes, never plaintext. It is transactional and safe to rerun.
+- Frontend: `http://localhost:4200/login`
+- API: `http://localhost:8080`
+- Health check: `http://localhost:8080/health`
 
 Development-only credentials:
 
@@ -99,100 +102,54 @@ Development-only credentials:
 | Caregiver | `caregiver1@careflow.local` | `careflow123` |
 | Caregiver | `caregiver2@careflow.local` | `careflow123` |
 
-## Authentication
+Browser location permission is required for caregiver EVV actions. Local defaults in `.env.example` are for development only; replace `JWT_SECRET` and database credentials outside local use.
 
-Log in:
-
-```bash
-curl -X POST http://localhost:8080/api/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"email":"coordinator@careflow.local","password":"careflow123"}'
-```
-
-Use the returned token as a Bearer token:
+## Testing
 
 ```bash
-curl http://localhost:8080/api/me \
-  -H "Authorization: Bearer <token>"
-
-curl http://localhost:8080/api/coordinator/ping \
-  -H "Authorization: Bearer <token>"
-```
-
-Protected proof endpoints are `GET /api/me`, `GET /api/coordinator/ping`, and `GET /api/caregiver/ping`. The two ping endpoints enforce their roles strictly.
-
-## Scheduling API
-
-Coordinator-only endpoints:
-
-- `POST /api/patients`
-- `GET /api/patients`
-- `GET /api/patients/{id}`
-- `PUT /api/patients/{id}`
-- `GET /api/caregivers`
-- `POST /api/visits`
-- `GET /api/visits`
-- `GET /api/visits/{id}`
-- `PATCH /api/visits/{id}`
-- `POST /api/visits/{id}/cancel`
-
-Caregiver-only endpoints:
-
-- `GET /api/caregiver/visits`
-- `GET /api/caregiver/visits/{id}`
-
-Caregivers can see only visits assigned to the authenticated JWT user. They cannot access patient management or coordinator visit mutations.
-
-Create a patient with a coordinator token:
-
-```bash
-curl -X POST http://localhost:8080/api/patients \
-  -H "Authorization: Bearer <coordinator-token>" \
-  -H "Content-Type: application/json" \
-  -d '{"first_name":"Jane","last_name":"Smith","address":"100 Main Street, Baltimore, MD","latitude":39.2904,"longitude":-76.6122}'
-```
-
-Create a visit:
-
-```bash
-curl -X POST http://localhost:8080/api/visits \
-  -H "Authorization: Bearer <coordinator-token>" \
-  -H "Content-Type: application/json" \
-  -d '{"patient_id":"<patient-uuid>","caregiver_id":"<caregiver-uuid>","scheduled_start":"2026-08-15T09:00:00-04:00","scheduled_end":"2026-08-15T12:00:00-04:00"}'
-```
-
-A caregiver cannot have overlapping scheduled or in-progress visits. The rule is `new_start < existing_end AND new_end > existing_start`, so visits that meet exactly at their boundaries are allowed. Cancelled visits do not cause conflicts.
-
-## Running and Testing
-
-```bash
+# Angular tests and production build
 cd frontend
-npm install
-npm start
-```
+npm ci
+npm test -- --watch=false
+npm run build
 
-```bash
-cd backend
-go run ./cmd/api
-go test ./...
-```
-
-Repository integration tests require `TEST_DATABASE_URL` and create a unique temporary schema for each test group. With Docker:
-
-```bash
-docker compose run --rm backend-test
-```
-
-This command runs both repository and authentication HTTP integration tests against PostgreSQL. Authentication unit tests are included in the normal `go test ./...` run.
-
-Run static checks with:
-
-```bash
-cd backend
-go fmt ./...
+# Go unit tests and static analysis
+cd ../backend
+gofmt -l .
 go vet ./...
+go test ./...
+
+# PostgreSQL integration tests and Compose validation, from repository root
+cd ..
+docker compose up -d postgres
+docker compose run --rm backend-test
+docker compose config --quiet
 ```
 
-## Current Status
+Integration tests create isolated PostgreSQL schemas and clean them up independently.
 
-CareFlow is in core scheduling and caregiver-assignment development. Coordinator patient/visit management, caregiver lookup, overlap prevention, cancellation, and caregiver-owned visit reads are implemented. Frontend workflows and EVV check-in/check-out remain unimplemented.
+## API Highlights
+
+- `POST /api/auth/login`
+- `GET /api/patients`
+- `POST /api/visits`
+- `GET /api/caregiver/visits`
+- `POST /api/caregiver/visits/{id}/check-in`
+- `POST /api/caregiver/visits/{id}/check-out`
+
+Coordinator visit endpoints also support combined status, EVV, caregiver, patient, and date filters plus an aggregate EVV summary.
+
+## Screenshots
+
+### Coordinator Dashboard
+<!-- Add coordinator dashboard screenshot to docs/images/ when available. -->
+
+### Caregiver Dashboard
+<!-- Add caregiver dashboard screenshot to docs/images/ when available. -->
+
+### EVV Visit Detail
+<!-- Add EVV visit detail screenshot to docs/images/ when available. -->
+
+## Project Status
+
+CareFlow is a completed portfolio-scale application demonstrating a tested end-to-end homecare scheduling and EVV workflow. It is not presented as production software.
